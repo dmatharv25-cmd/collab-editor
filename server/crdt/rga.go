@@ -23,23 +23,32 @@ type Op struct {
 	Target ID   // delete: the character to delete
 }
 
-type element struct {
-	id      ID
-	value   rune
-	deleted bool // tombstone
+// node is one character in a doubly linked list (tombstones included).
+type node struct {
+	id         ID
+	value      rune
+	deleted    bool // tombstone
+	prev, next *node
 }
 
 // Doc is one replica of the document.
 type Doc struct {
 	client  string
 	clock   uint64
-	elems   []element // all elements, including tombstones, in document order
-	seen    map[ID]struct{}
+	head    *node // sentinel before the first character
+	index   map[ID]*node
 	visible int
+
+	// Finger: a remembered spot in the list. fCount is the number of
+	// visible characters at or before fNode. It makes sequential local
+	// edits O(1) instead of O(n).
+	fNode  *node
+	fCount int
 }
 
 func New(client string) *Doc {
-	return &Doc{client: client, seen: make(map[ID]struct{})}
+	h := &node{}
+	return &Doc{client: client, head: h, index: make(map[ID]*node), fNode: h}
 }
 
 // Len returns the number of visible characters.
@@ -48,12 +57,37 @@ func (d *Doc) Len() int { return d.visible }
 // String returns the visible text.
 func (d *Doc) String() string {
 	out := make([]rune, 0, d.visible)
-	for _, e := range d.elems {
-		if !e.deleted {
-			out = append(out, e.value)
+	for n := d.head.next; n != nil; n = n.next {
+		if !n.deleted {
+			out = append(out, n.value)
 		}
 	}
 	return string(out)
+}
+
+func (d *Doc) resetFinger() {
+	d.fNode, d.fCount = d.head, 0
+}
+
+// nodeAt returns the node holding the visible character at pos (0-based)
+// and moves the finger to it. The caller must ensure 0 <= pos < visible.
+func (d *Doc) nodeAt(pos int) *node {
+	target := pos + 1
+	cur, c := d.fNode, d.fCount
+	for c < target { // walk forward
+		cur = cur.next
+		if !cur.deleted {
+			c++
+		}
+	}
+	for c > target || (c == target && cur.deleted) { // walk backward
+		if !cur.deleted {
+			c--
+		}
+		cur = cur.prev
+	}
+	d.fNode, d.fCount = cur, c
+	return cur
 }
 
 // LocalInsert inserts r at visible position pos and returns the op to broadcast.
@@ -63,13 +97,15 @@ func (d *Doc) LocalInsert(pos int, r rune) (Op, error) {
 	}
 	var after ID
 	if pos > 0 {
-		after = d.elems[d.visibleIndex(pos-1)].id
+		after = d.nodeAt(pos - 1).id
 	}
 	d.clock++
 	op := Op{Type: OpInsert, ID: ID{Client: d.client, Seq: d.clock}, After: after, Value: r}
-	if err := d.Apply(op); err != nil {
+	n, err := d.integrateInsert(op)
+	if err != nil {
 		return Op{}, err
 	}
+	d.fNode, d.fCount = n, pos+1
 	return op, nil
 }
 
@@ -78,11 +114,11 @@ func (d *Doc) LocalDelete(pos int) (Op, error) {
 	if pos < 0 || pos >= d.visible {
 		return Op{}, ErrOutOfRange
 	}
-	op := Op{Type: OpDelete, Target: d.elems[d.visibleIndex(pos)].id}
-	if err := d.Apply(op); err != nil {
-		return Op{}, err
-	}
-	return op, nil
+	n := d.nodeAt(pos)
+	n.deleted = true
+	d.visible--
+	d.fNode, d.fCount = n, pos
+	return Op{Type: OpDelete, Target: n.id}, nil
 }
 
 // Apply integrates an operation (local or remote). It is idempotent.
@@ -91,63 +127,54 @@ func (d *Doc) LocalDelete(pos int) (Op, error) {
 func (d *Doc) Apply(op Op) error {
 	switch op.Type {
 	case OpInsert:
-		if _, ok := d.seen[op.ID]; ok {
-			return nil // duplicate delivery
+		n, err := d.integrateInsert(op)
+		if err != nil {
+			return err
 		}
-		idx := 0
-		if !op.After.IsZero() {
-			i := d.indexOf(op.After)
-			if i < 0 {
-				return ErrMissingDependency
-			}
-			idx = i + 1
-		}
-		// Skip over elements with a greater ID: they win the tie-break.
-		for idx < len(d.elems) && d.elems[idx].id.Greater(op.ID) {
-			idx++
-		}
-		d.elems = append(d.elems, element{})
-		copy(d.elems[idx+1:], d.elems[idx:])
-		d.elems[idx] = element{id: op.ID, value: op.Value}
-		d.seen[op.ID] = struct{}{}
-		d.visible++
-		if op.ID.Seq > d.clock {
-			d.clock = op.ID.Seq // keep the Lamport clock ahead of everything seen
+		if n != nil {
+			d.resetFinger()
 		}
 	case OpDelete:
-		i := d.indexOf(op.Target)
-		if i < 0 {
+		n, ok := d.index[op.Target]
+		if !ok {
 			return ErrMissingDependency
 		}
-		if !d.elems[i].deleted {
-			d.elems[i].deleted = true
+		if !n.deleted {
+			n.deleted = true
 			d.visible--
+			d.resetFinger()
 		}
 	}
 	return nil
 }
 
-// indexOf finds an element by ID (linear scan; we will optimise this later).
-func (d *Doc) indexOf(id ID) int {
-	for i := range d.elems {
-		if d.elems[i].id == id {
-			return i
-		}
+// integrateInsert places a new node in the list. It returns (nil, nil)
+// for a duplicate op.
+func (d *Doc) integrateInsert(op Op) (*node, error) {
+	if _, ok := d.index[op.ID]; ok {
+		return nil, nil // duplicate delivery
 	}
-	return -1
-}
-
-// visibleIndex maps a visible position to an index in elems.
-func (d *Doc) visibleIndex(pos int) int {
-	n := 0
-	for i := range d.elems {
-		if d.elems[i].deleted {
-			continue
+	prev := d.head
+	if !op.After.IsZero() {
+		p, ok := d.index[op.After]
+		if !ok {
+			return nil, ErrMissingDependency
 		}
-		if n == pos {
-			return i
-		}
-		n++
+		prev = p
 	}
-	return -1
+	// Skip over elements with a greater ID: they win the tie-break.
+	for prev.next != nil && prev.next.id.Greater(op.ID) {
+		prev = prev.next
+	}
+	n := &node{id: op.ID, value: op.Value, prev: prev, next: prev.next}
+	if prev.next != nil {
+		prev.next.prev = n
+	}
+	prev.next = n
+	d.index[op.ID] = n
+	d.visible++
+	if op.ID.Seq > d.clock {
+		d.clock = op.ID.Seq // keep the Lamport clock ahead of everything seen
+	}
+	return n, nil
 }
