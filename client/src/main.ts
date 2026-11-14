@@ -1,4 +1,4 @@
-import { Doc, type Op } from "./crdt";
+import { Doc, opKey, type Op } from "./crdt";
 import { diffCodePoints, mapIndex } from "./diff";
 
 const room = new URLSearchParams(location.search).get("room") ?? "lobby";
@@ -9,13 +9,21 @@ const url = `ws://${location.hostname}:8080/ws?room=${encodeURIComponent(room)}`
 const box = document.getElementById("editor") as HTMLTextAreaElement;
 const status = document.getElementById("status") as HTMLElement;
 const info = document.getElementById("info") as HTMLElement;
-info.textContent = `room: ${room} | you are ${clientId} `;
 
 const btn = document.createElement("button");
 btn.textContent = "Go offline";
 info.after(btn);
 
 const toCodePoints = (s: string): number[] => Array.from(s, (ch) => ch.codePointAt(0)!);
+
+// Ops we sent that the server has not acknowledged yet, in the order we made them.
+// After any reconnect we resend all of them; the server ignores duplicates.
+const unacked = new Map<string, string>();
+
+function updateInfo(): void {
+  info.textContent = `room: ${room} | you are ${clientId} | unsynced ops: ${unacked.size} `;
+}
+updateInfo();
 
 function setStatus(text: string, on: boolean): void {
   status.textContent = text;
@@ -26,7 +34,6 @@ let ws: WebSocket | null = null;
 let retryDelay = 500;
 let retryTimer: number | undefined;
 let manualOffline = false;
-const outbox: string[] = [];
 
 function connect(): void {
   const sock = new WebSocket(url);
@@ -34,10 +41,18 @@ function connect(): void {
   sock.onopen = () => {
     retryDelay = 500;
     setStatus("connected", true);
-    for (const msg of outbox.splice(0)) sock.send(msg);
+    for (const msg of unacked.values()) sock.send(msg);
   };
   sock.onmessage = (ev) => {
-    receive(JSON.parse(ev.data as string) as Op);
+    const data = JSON.parse(ev.data as string);
+    if (Array.isArray(data)) {
+      if (data[0] === "ack") {
+        unacked.delete(data[1] as string);
+        updateInfo();
+      }
+      return;
+    }
+    receive(data as Op);
     render();
   };
   sock.onclose = () => {
@@ -55,8 +70,9 @@ function connect(): void {
 
 function send(op: Op): void {
   const msg = JSON.stringify(op);
+  unacked.set(opKey(op), msg);
+  updateInfo();
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(msg);
-  else outbox.push(msg);
 }
 
 btn.onclick = () => {

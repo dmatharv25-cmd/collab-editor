@@ -155,3 +155,7 @@ export function applyAll(doc: Doc, ops: Op[]): number {
   }
   return 0;
 }
+
+// Identifies an op on the wire. Must match opKey in server/hub/hub.go.
+export const opKey = (op: Op): string =>
+  `${op.Type}|${op.ID.Client}:${op.ID.Seq}|${op.Target.Client}:${op.Target.Seq}`;

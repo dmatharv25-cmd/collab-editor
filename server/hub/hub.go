@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -19,6 +20,7 @@ type Room struct {
 	doc     *crdt.Doc
 	log     []crdt.Op // every applied op, in the order this server applied it
 	pending []crdt.Op // ops waiting for a dependency
+	seen    map[string]struct{}
 	clients map[*client]struct{}
 }
 
@@ -36,12 +38,22 @@ func New() *Hub {
 	return &Hub{rooms: make(map[string]*Room)}
 }
 
+// opKey identifies an op on the wire. The client computes the same string.
+func opKey(op crdt.Op) string {
+	return fmt.Sprintf("%d|%s:%d|%s:%d", op.Type, op.ID.Client, op.ID.Seq, op.Target.Client, op.Target.Seq)
+}
+
 func (h *Hub) room(name string) *Room {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	r, ok := h.rooms[name]
 	if !ok {
-		r = &Room{name: name, doc: crdt.New("server"), clients: make(map[*client]struct{})}
+		r = &Room{
+			name:    name,
+			doc:     crdt.New("server"),
+			seen:    make(map[string]struct{}),
+			clients: make(map[*client]struct{}),
+		}
 		h.rooms[name] = r
 	}
 	return r
@@ -133,10 +145,22 @@ func (h *Hub) ServeWS(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// handle applies an op from a client and broadcasts it to everyone else.
+// handle acks an op, then applies it and broadcasts it to everyone else.
+// Duplicates (resends after a reconnect) are acked but otherwise ignored.
 func (r *Room) handle(op crdt.Op, from *client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	k := opKey(op)
+	ack, _ := json.Marshal([]string{"ack", k})
+	select {
+	case from.send <- ack:
+	default:
+	}
+	if _, dup := r.seen[k]; dup {
+		return
+	}
+	r.seen[k] = struct{}{}
 
 	r.pending = append(r.pending, op)
 	// Keep applying until no pending op can make progress.
