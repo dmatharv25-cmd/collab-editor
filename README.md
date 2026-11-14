@@ -1,3 +1,5 @@
+[![CI](https://github.com/dmatharv25-cmd/collab-editor/actions/workflows/ci.yml/badge.svg)](https://github.com/dmatharv25-cmd/collab-editor/actions/workflows/ci.yml)
+
 # collab-editor
 
 A real-time collaborative text editor with a **hand-built CRDT**, written in Go and TypeScript.
