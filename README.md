@@ -67,3 +67,14 @@ Writes from all rooms are grouped into one transaction per disk write (group com
 | SQLite, one write per op | ~39 ms | ~130 ms | ~175 ms |
 | SQLite, batched | ~20 ms | ~45 ms | ~58 ms |
 | memory only | ~20 ms | ~55 ms | ~92 ms |
+
+## How it works
+
+- **CRDT (RGA):** every character is an op with a unique ID (client + Lamport clock) and a pointer to the character it follows. Concurrent inserts are ordered by a deterministic tie-break, so all replicas converge to the same text regardless of arrival order. The Go server and the TypeScript client share test vectors (`conformance/`) to prove both implementations agree.
+- **Offline editing:** the client keeps working while disconnected, queues its ops, and merges on reconnect.
+- **Acks and resend:** each op has a key. The server acks after the op is saved; the client resends anything unacked after a reconnect. The server de-duplicates by key, so resends are safe.
+- **Persistence:** every op is appended to SQLite before it is acked, so an ack means the op is on disk. On startup a room is rebuilt by replaying its ops, including ones that arrive before their dependencies.
+- **Group commit:** a single writer goroutine batches writes from all rooms into one transaction, and the room lock is released during the disk write. This cut p95 ack latency under load from about 130 ms to about 45 ms.
+- **Load test:** `loadtest/loadtest.py` drives many websocket clients and verifies convergence.
+
+Known limits: the op log grows without bound (no snapshots or compaction yet), and there is no auth.
