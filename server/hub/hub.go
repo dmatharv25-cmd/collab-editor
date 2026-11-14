@@ -21,14 +21,15 @@ type Store interface {
 
 // Room is one shared document plus its connected clients.
 type Room struct {
-	mu      sync.Mutex
-	name    string
-	store   Store
-	doc     *crdt.Doc
-	log     []crdt.Op // every applied op, in the order this server applied it
-	pending []crdt.Op // ops waiting for a dependency
-	seen    map[string]struct{}
-	clients map[*client]struct{}
+	mu       sync.Mutex
+	name     string
+	store    Store
+	doc      *crdt.Doc
+	log      []crdt.Op // every applied op, in the order this server applied it
+	pending  []crdt.Op // ops waiting for a dependency
+	seen     map[string]struct{}
+	inflight map[string]chan struct{}
+	clients  map[*client]struct{}
 }
 
 type client struct {
@@ -179,24 +180,47 @@ func (r *Room) restore(ops []crdt.Op) {
 // handle saves an op, acks it, then applies and broadcasts it.
 // Duplicates (resends after a reconnect) are acked but otherwise ignored.
 func (r *Room) handle(op crdt.Op, from *client) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	k := opKey(op)
-	if _, dup := r.seen[k]; !dup {
-		// Save BEFORE acking: an ack means "durably stored".
-		if r.store != nil {
-			if err := r.store.Append(r.name, k, op); err != nil {
-				log.Println("persist:", err)
-				return // no ack, so the client keeps the op and resends later
-			}
+	var mine chan struct{}
+	for {
+		r.mu.Lock()
+		if _, dup := r.seen[k]; dup {
+			r.sendAck(from, k)
+			r.mu.Unlock()
+			return
 		}
-		r.seen[k] = struct{}{}
-		r.sendAck(from, k)
-		r.integrate(op, from)
-		return
+		if r.inflight == nil {
+			r.inflight = make(map[string]chan struct{})
+		}
+		if ch, busy := r.inflight[k]; busy {
+			r.mu.Unlock()
+			<-ch // same op is being saved by another connection; wait, then re-check
+			continue
+		}
+		mine = make(chan struct{})
+		r.inflight[k] = mine
+		r.mu.Unlock()
+		break
 	}
+
+	// Save BEFORE acking, outside the room lock so other rooms and ops can batch.
+	var err error
+	if r.store != nil {
+		err = r.store.Append(r.name, k, op)
+	}
+
+	r.mu.Lock()
+	delete(r.inflight, k)
+	close(mine)
+	if err != nil {
+		r.mu.Unlock()
+		log.Println("persist:", err)
+		return // no ack, so the client keeps the op and resends later
+	}
+	r.seen[k] = struct{}{}
 	r.sendAck(from, k)
+	r.integrate(op, from)
+	r.mu.Unlock()
 }
 
 func (r *Room) sendAck(to *client, key string) {

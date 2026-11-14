@@ -57,3 +57,13 @@ To run it, start the server and then:
     python loadtest/loadtest.py --clients 50 --ops 100 --rate 2
 
 To load several rooms at once, start more than one process; each picks its own room name.
+
+### Batched SQLite writes
+
+Writes from all rooms are grouped into one transaction per disk write (group commit), and the room lock is released while the write happens. An ack still means the op is on disk. Same test, 200 clients, about 760 ops/s, 4 rooms, 0 ops lost:
+
+| Mode | p50 | p95 | p99 |
+|---|---|---|---|
+| SQLite, one write per op | ~39 ms | ~130 ms | ~175 ms |
+| SQLite, batched | ~20 ms | ~45 ms | ~58 ms |
+| memory only | ~20 ms | ~55 ms | ~92 ms |
