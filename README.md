@@ -35,7 +35,7 @@ Open `http://localhost:5173/?room=demo` in two tabs.
 
 - [x] Acknowledgements and resend for ops lost in flight
 - [x] Persistence (operation log in a database)
-- [ ] Load test with 50+ simulated users (p95 latency)
+- [x] Load test with 50+ simulated users (p95 latency)
 - [ ] Tombstone compaction
 
 ## Load test
@@ -51,7 +51,7 @@ Results on one Windows machine (server and Python clients on the same box, so cl
 | 200 clients, ~760 ops/s, 4 rooms | SQLite | ~39 ms | ~130 ms | ~175 ms |
 | 200 clients, ~760 ops/s, 4 rooms | memory only | ~20 ms | ~55 ms | ~92 ms |
 
-Saving before acking costs about 7 ms at p50 for a single room and about 19 ms at p50 under 4 busy rooms. All writes share one SQLite connection, so batching writes is the obvious next optimisation.
+Saving before acking costs about 7 ms at p50 for a single room and about 19 ms at p50 under 4 busy rooms. All writes share one SQLite connection; the next section shows how batching them fixes this.
 
 To run it, start the server and then:
 
