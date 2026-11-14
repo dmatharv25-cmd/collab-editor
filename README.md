@@ -50,3 +50,10 @@ Results on one Windows machine (server and Python clients on the same box, so cl
 | 200 clients, ~760 ops/s, 4 rooms | memory only | ~20 ms | ~55 ms | ~92 ms |
 
 Saving before acking costs about 7 ms at p50 for a single room and about 19 ms at p50 under 4 busy rooms. All writes share one SQLite connection, so batching writes is the obvious next optimisation.
+
+To run it, start the server and then:
+
+    pip install websockets
+    python loadtest/loadtest.py --clients 50 --ops 100 --rate 2
+
+To load several rooms at once, start more than one process; each picks its own room name.
