@@ -35,3 +35,18 @@ Open `http://localhost:5173/?room=demo` in two tabs.
 - [x] Persistence (operation log in a database)
 - [ ] Load test with 50+ simulated users (p95 latency)
 - [ ] Tombstone compaction
+
+## Load test
+
+`loadtest/loadtest.py` opens N websocket clients on a fresh room, sends inserts at a fixed rate, and measures send-to-ack latency. Because the server saves each op to SQLite before acking, the latency includes the disk write. At the end it checks that the server's text length equals clients x ops.
+
+Results on one Windows machine (server and Python clients on the same box, so client CPU is included). Every run: 0 ops lost, all rooms converged.
+
+| Load | Mode | p50 | p95 | p99 |
+|---|---|---|---|---|
+| 50 clients, ~100 ops/s, 1 room | SQLite | 23.5 ms | 57.7 ms | 96.5 ms |
+| 50 clients, ~100 ops/s, 1 room | memory only | 16.4 ms | 38.4 ms | 45.4 ms |
+| 200 clients, ~760 ops/s, 4 rooms | SQLite | ~39 ms | ~130 ms | ~175 ms |
+| 200 clients, ~760 ops/s, 4 rooms | memory only | ~20 ms | ~55 ms | ~92 ms |
+
+Saving before acking costs about 7 ms at p50 for a single room and about 19 ms at p50 under 4 busy rooms. All writes share one SQLite connection, so batching writes is the obvious next optimisation.

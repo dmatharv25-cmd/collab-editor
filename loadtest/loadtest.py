@@ -84,7 +84,7 @@ async def main():
     ap.add_argument("--drain", type=float, default=10, help="seconds to wait for last acks")
     args = ap.parse_args()
 
-    room = f"load-{int(time.time())}"
+    room = f"load-{int(time.time())}-{random.randrange(10**6)}"
     lat = []
     counters = {"connected": 0, "sent": 0, "acked": 0, "received": 0, "lost": 0}
     all_connected = asyncio.Event()
