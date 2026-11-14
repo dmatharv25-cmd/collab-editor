@@ -13,10 +13,17 @@ import (
 	"github.com/dmatharv25-cmd/collab-editor/server/crdt"
 )
 
+// Store persists the ops a room receives. A nil Store means memory only.
+type Store interface {
+	Append(room, key string, op crdt.Op) error
+	Load(room string) ([]crdt.Op, error)
+}
+
 // Room is one shared document plus its connected clients.
 type Room struct {
 	mu      sync.Mutex
 	name    string
+	store   Store
 	doc     *crdt.Doc
 	log     []crdt.Op // every applied op, in the order this server applied it
 	pending []crdt.Op // ops waiting for a dependency
@@ -32,10 +39,15 @@ type client struct {
 type Hub struct {
 	mu    sync.Mutex
 	rooms map[string]*Room
+	store Store
 }
 
 func New() *Hub {
 	return &Hub{rooms: make(map[string]*Room)}
+}
+
+func NewWithStore(s Store) *Hub {
+	return &Hub{rooms: make(map[string]*Room), store: s}
 }
 
 // opKey identifies an op on the wire. The client computes the same string.
@@ -50,9 +62,20 @@ func (h *Hub) room(name string) *Room {
 	if !ok {
 		r = &Room{
 			name:    name,
+			store:   h.store,
 			doc:     crdt.New("server"),
 			seen:    make(map[string]struct{}),
 			clients: make(map[*client]struct{}),
+		}
+		if h.store != nil {
+			ops, err := h.store.Load(name)
+			if err != nil {
+				log.Println("load room", name, ":", err)
+			}
+			r.restore(ops)
+			if len(ops) > 0 {
+				log.Printf("restored room %q: %d ops", name, len(ops))
+			}
 		}
 		h.rooms[name] = r
 	}
@@ -145,23 +168,48 @@ func (h *Hub) ServeWS(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// handle acks an op, then applies it and broadcasts it to everyone else.
+// restore rebuilds the document from saved ops when a room is first opened.
+func (r *Room) restore(ops []crdt.Op) {
+	for _, op := range ops {
+		r.seen[opKey(op)] = struct{}{}
+		r.integrate(op, nil)
+	}
+}
+
+// handle saves an op, acks it, then applies and broadcasts it.
 // Duplicates (resends after a reconnect) are acked but otherwise ignored.
 func (r *Room) handle(op crdt.Op, from *client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	k := opKey(op)
-	ack, _ := json.Marshal([]string{"ack", k})
-	select {
-	case from.send <- ack:
-	default:
-	}
-	if _, dup := r.seen[k]; dup {
+	if _, dup := r.seen[k]; !dup {
+		// Save BEFORE acking: an ack means "durably stored".
+		if r.store != nil {
+			if err := r.store.Append(r.name, k, op); err != nil {
+				log.Println("persist:", err)
+				return // no ack, so the client keeps the op and resends later
+			}
+		}
+		r.seen[k] = struct{}{}
+		r.sendAck(from, k)
+		r.integrate(op, from)
 		return
 	}
-	r.seen[k] = struct{}{}
+	r.sendAck(from, k)
+}
 
+func (r *Room) sendAck(to *client, key string) {
+	ack, _ := json.Marshal([]string{"ack", key})
+	select {
+	case to.send <- ack:
+	default:
+	}
+}
+
+// integrate applies an op (and anything it unblocks) and broadcasts the result.
+// from may be nil, for example while restoring a room from disk.
+func (r *Room) integrate(op crdt.Op, from *client) {
 	r.pending = append(r.pending, op)
 	// Keep applying until no pending op can make progress.
 	for progress := true; progress; {
