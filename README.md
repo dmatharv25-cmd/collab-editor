@@ -32,6 +32,6 @@ Open `http://localhost:5173/?room=demo` in two tabs.
 ## Roadmap
 
 - [x] Acknowledgements and resend for ops lost in flight
-- [ ] Persistence (operation log in a database)
+- [x] Persistence (operation log in a database)
 - [ ] Load test with 50+ simulated users (p95 latency)
 - [ ] Tombstone compaction
