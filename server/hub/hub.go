@@ -94,23 +94,33 @@ func (h *Hub) Text(name string) string {
 // ServeWS upgrades the HTTP request and runs the connection until it closes.
 func (h *Hub) ServeWS(w http.ResponseWriter, req *http.Request) {
 	name := req.URL.Query().Get("room")
-	if name == "" {
+	if name == "" || len(name) > MaxRoomNameLen {
 		http.Error(w, "missing ?room=", http.StatusBadRequest)
 		return
 	}
-	conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{OriginPatterns: OriginPatterns})
 	if err != nil {
 		log.Println("accept:", err)
 		return
 	}
 	defer conn.CloseNow()
+	conn.SetReadLimit(MaxMessageBytes)
 
+	if !h.admit(name) {
+		conn.Close(websocket.StatusTryAgainLater, "too many rooms")
+		return
+	}
 	room := h.room(name)
 	c := &client{send: make(chan []byte, 1024)}
 
 	// Register and snapshot the log under one lock so no op is missed.
 	// Ops that arrive after this point queue up in c.send.
 	room.mu.Lock()
+	if len(room.clients) >= MaxClientsPerRoom {
+		room.mu.Unlock()
+		conn.Close(websocket.StatusTryAgainLater, "room full")
+		return
+	}
 	room.clients[c] = struct{}{}
 	snapshot := append([]crdt.Op(nil), room.log...)
 	room.mu.Unlock()
