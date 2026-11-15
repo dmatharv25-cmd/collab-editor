@@ -4,7 +4,8 @@ import { diffCodePoints, mapIndex } from "./diff";
 const room = new URLSearchParams(location.search).get("room") ?? "lobby";
 const clientId = "c" + Math.random().toString(36).slice(2, 8);
 const doc = new Doc(clientId);
-const url = `ws://${location.hostname}:8080/ws?room=${encodeURIComponent(room)}`;
+const wsBase = location.port === "5173" ? `ws://${location.hostname}:8080` : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
+const url = `${wsBase}/ws?room=${encodeURIComponent(room)}`;
 
 const box = document.getElementById("editor") as HTMLTextAreaElement;
 const status = document.getElementById("status") as HTMLElement;

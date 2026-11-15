@@ -8,3 +8,6 @@ __pycache__/
 collab.db
 collab.db-wal
 collab.db-shm
+
+client/dist
+
