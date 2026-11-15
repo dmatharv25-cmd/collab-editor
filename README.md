@@ -3,6 +3,8 @@
 # collab-editor
 
 A real-time collaborative text editor with a **hand-built CRDT**, written in Go and TypeScript.
+
+**[Live demo](https://collab-editor-lfi1.onrender.com/?room=try-me)**: open it in two tabs and type. The demo runs on a free instance, so it can take up to a minute to wake up, and it runs in memory-only mode, so documents reset when it restarts. It is public, so don't type anything private. For a private room, change `room=` in the URL to any name you like.
 Edit the same document from multiple browser tabs, go offline, keep typing, and everything merges on reconnect.
 
 ![Demo: two windows editing together, one goes offline and merges back](docs/demo.gif)
